@@ -1,32 +1,62 @@
 window.onload = () => {
-  const W = 900, H = 420;
+  const container = document.getElementById('game-container');
+  const BASE_W = container?.clientWidth || 900;
+  const BASE_H = container?.clientHeight || 420;
 
-  function sceneLog(scene, msg) {
-    if (scene.debugMode) console.log('[GAME]', msg);
-  }
+  const T = {
+    wizardHeightFrac: 0.28,
+    ghostRelativeToWizard: 2.2,
+    wizardScreenXFrac: 0.14,
+    baseWizardSpeedPerSec: 220,
+    minWizardSpeedPerSec: 80,
+    baseGhostSpeedPerSec: 150,
+    slowAmountBase: 120,
+    slowDurationMs: 900,
+    slideDurationMs: 450,
+    jumpVelocityBase: -520,
+    spawnIntervalMin: 700,
+    spawnIntervalMax: 1600,
+    topChance: 0.45,
+    bottomChance: 0.65,
+    holeChance: 0.28,
+    movingVineChance: 0.35,
+    doubleObstacleChance: 0.15,
+    speedDriftPerSec: 2.5,
+    consecutiveAvoidsToWin: 3,
+    difficultyScaleRate: 0.00025 // how fast difficulty scales
+  };
+
+  const sceneLog = (scene, msg) => { if (scene.debugMode) console.log('[GAME]', msg); };
 
   function initGameParams(scene) {
-    scene.baseWizardSpeed = 220;
-    scene.wizardSpeed = scene.baseWizardSpeed;
-    scene.minWizardSpeed = 80;
-    scene.ghostSpeed = 150;
-    scene.slowAmount = 120;
-    scene.slowDuration = 900;
-    scene.spawnInterval = 1400;
-    scene.jumpVelocity = -540; // slightly higher jump
-    scene.slideDuration = 500;
+    const W = scene.scale.width, H = scene.scale.height;
+    const scaleFactor = H / BASE_H;
 
-    scene.wizardScreenX = 140;
+    scene.baseWizardSpeed = T.baseWizardSpeedPerSec * scaleFactor;
+    scene.wizardSpeed = scene.baseWizardSpeed;
+    scene.minWizardSpeed = T.minWizardSpeedPerSec * scaleFactor;
+    scene.ghostSpeed = T.baseGhostSpeedPerSec * scaleFactor;
+    scene.slowAmount = Math.round(T.slowAmountBase * scaleFactor);
+    scene.slowDuration = T.slowDurationMs;
+    scene.slideDuration = T.slideDurationMs;
+    scene.jumpVelocity = T.jumpVelocityBase * scaleFactor;
+
+    scene.wizardScreenX = Math.round(W * T.wizardScreenXFrac);
     scene.wizardWorldX = 0;
-    scene.ghostWorldX = 600;
-    scene.consecutiveAvoids = 0;
+    scene.ghostWorldX = scene.wizardWorldX + Math.round(W * 0.85);
+
     scene.pairs = {};
     scene.nextPairId = 0;
     scene.isSliding = false;
     scene.slowing = false;
     scene.gameOverFlag = false;
-
+    scene.powerActive = false;
     scene.debugMode = false;
+
+    scene.spawnTimer = null;
+    scene.comboHits = 0; // track successful hits
+    scene.elapsedTime = 0; // total time for difficulty scaling
+    scene.misses = 0;
   }
 
   function preloadAssets(scene) {
@@ -37,64 +67,66 @@ window.onload = () => {
     scene.load.image('neeli', 'neeli.png');
     scene.load.image('kathanar', 'kathnarpic.png');
     scene.load.image('vinetop', 'vinetop-pic.png');
+    scene.load.image('ghostball', 'ghost-ball.png');
   }
 
   function generatePlaceholderTextures(scene) {
-    const g = scene.add.graphics();
-    g.fillStyle(0x00cc66, 1).fillRect(0,0,40,60);
-    g.generateTexture('wiz', 40,60);
-    g.clear();
+    if (!scene.textures.exists('wiz')) {
+      const g = scene.add.graphics();
+      g.fillStyle(0x00cc66, 1).fillRect(0,0,40,60);
+      g.generateTexture('wiz', 40,60);
+      g.destroy();
+    }
   }
 
-  function createBackground(scene, W, H) {
+  function createBackground(scene) {
+    const W = scene.scale.width, H = scene.scale.height;
     scene.bg = scene.add.image(0,0,'forest').setOrigin(0,0);
     scene.bg.displayWidth = W;
     scene.bg.displayHeight = H;
   }
 
-  function createGround(scene, W, H) {
-    const groundY = H - 60;
-    const ground = scene.add.image(W / 2, H, 'floor');
-    ground.setOrigin(0.5, 1);
+  function createGround(scene) {
+    const W = scene.scale.width, H = scene.scale.height;
+    const groundY = H - Math.round(H * 0.10);
+    const ground = scene.add.image(W/2, H, 'floor').setOrigin(0.5, 1);
     scene.physics.add.existing(ground, true);
     scene.groundY = groundY;
     return ground;
   }
 
-  // 🔥 Wizard now always big and visible
   function createWizard(scene) {
-    scene.wizard = scene.physics.add.sprite(scene.wizardScreenX, scene.groundY, 'kathanar');
-    scene.wizard.setOrigin(0.5, 1); // anchor at feet
-
-    // scale wizard so height is ~120px (much larger than before)
-    const desiredHeight = 120;
-    const scale = desiredHeight / scene.wizard.displayHeight;
+    const H = scene.scale.height;
+    scene.wizard = scene.physics.add.sprite(0,0,'kathanar').setOrigin(0.5,1);
+    const desiredHeight = Math.round(H * T.wizardHeightFrac);
+    const baseImg = scene.textures.get('kathanar').getSourceImage();
+    const scale = desiredHeight / (baseImg ? baseImg.height : 180);
     scene.wizard.setScale(scale);
+    scene._origWizardScale = { x: scene.wizard.scaleX, y: scene.wizard.scaleY };
 
-    // set collision box relative to sprite size
-    const bw = scene.wizard.displayWidth * 0.6;
+    scene.wizard.body.setAllowGravity(true);
+    const bw = scene.wizard.displayWidth * 0.56;
     const bh = scene.wizard.displayHeight * 0.9;
     scene.wizard.body.setSize(bw, bh);
-    scene.wizard.body.setOffset((scene.wizard.displayWidth - bw) / 2, scene.wizard.displayHeight - bh);
+    scene.wizard.body.setOffset((scene.wizard.displayWidth - bw)/2, scene.wizard.displayHeight - bh);
 
     scene.wizard.body.setCollideWorldBounds(true);
-    scene.wizard.body.setImmovable(true);
-    scene.wizard.body.setMaxVelocity(999, 1200);
+    scene.wizard.body.setMaxVelocity(9999, 3000);
 
-    // set default Y based on sprite height
-    scene.wizardDefaultY = scene.groundY;
-    scene.wizard.y = scene.wizardDefaultY;
+    const liftFraction = 0.12;
+    scene.wizardDefaultY = scene.groundY - Math.round(scene.wizard.displayHeight * liftFraction);
+    scene.wizard.setPosition(scene.wizardScreenX, scene.wizardDefaultY);
   }
 
   function createGhost(scene) {
-    scene.ghost = scene.physics.add.sprite(
-      scene.wizardScreenX + (scene.ghostWorldX - scene.wizardWorldX),
-      scene.groundY - 30,
-      'neeli'
-    );
-    scene.ghost.setScale(0.6); // scaled down
+    const H = scene.scale.height;
+    const ghostY = scene.groundY - Math.round(H * 0.14);
+    scene.ghost = scene.physics.add.sprite(scene.wizardScreenX + (scene.ghostWorldX - scene.wizardWorldX), ghostY, 'neeli');
+    const ghostScale = Math.max(0.8, scene._origWizardScale.y * T.ghostRelativeToWizard);
+    scene.ghost.setScale(ghostScale);
     scene.ghost.body.setAllowGravity(false);
-    scene.ghost.setAlpha(0.9);
+    scene.ghost.setAlpha(0.98);
+    scene.ghostBalls = scene.physics.add.group({ allowGravity:false });
   }
 
   function createObstaclesGroup(scene) {
@@ -107,140 +139,121 @@ window.onload = () => {
       up2: Phaser.Input.Keyboard.KeyCodes.UP,
       down1: Phaser.Input.Keyboard.KeyCodes.S,
       down2: Phaser.Input.Keyboard.KeyCodes.DOWN,
-      space: Phaser.Input.Keyboard.KeyCodes.SPACE
+      space: Phaser.Input.Keyboard.KeyCodes.SPACE,
+      power: Phaser.Input.Keyboard.KeyCodes.K
     });
   }
 
   function createUI(scene) {
-    scene.infoTxt = scene.add.text(12, 10,
-      'Controls: Jump (W/UP/Space) — Slide (S/DOWN).\nEnter hole by pressing DOWN while overlapping it.',
-      { font: '14px monospace', fill: '#ffffff' });
-    scene.distanceTxt = scene.add.text(12, 80, '', { font: '16px monospace', fill: '#ffee66' });
+    const H = scene.scale.height;
+    scene.infoTxt = scene.add.text(12, 8, 'Jump: W/UP/Space • Slide/Down: S/DOWN • Ghost attack: K', { font: `${Math.round(H*0.026)}px monospace`, fill: '#fff' });
+    scene.distanceTxt = scene.add.text(12, Math.round(H*0.10), '', { font: `${Math.round(H*0.032)}px monospace`, fill: '#ffea66' });
   }
 
-  function startSpawning(scene) {
-    stopSpawning(scene);
-    scene.spawnTimer = scene.time.addEvent({
-      delay: scene.spawnInterval,
-      callback: () => spawnPair(scene),
-      loop: true
+  function scheduleNextSpawn(scene) {
+    const delay = Phaser.Math.Between(T.spawnIntervalMin, T.spawnIntervalMax);
+    scene.time.delayedCall(delay, () => {
+      spawnPair(scene);
+
+      if (!scene.gameOverFlag) scheduleNextSpawn(scene);
     });
   }
 
-  function stopSpawning(scene) {
-    if (scene.spawnTimer) {
-      scene.spawnTimer.remove(false);
-      scene.spawnTimer = null;
-    }
-  }
-
-  // ---------------- Obstacle & Hole spawn ----------------
-  function spawnPair(scene) {
+ function spawnPair(scene) {
     const id = scene.nextPairId++;
-    const spawnX = scene.game.config.width + 80;
+    const W = scene.scale.width;
+    const spawnX = W + Phaser.Math.Between(Math.round(W*0.05), Math.round(W*0.12)); // random horizontal offset
 
-    const topY = 0;
-    const bottomY = scene.groundY;
+    const elapsed = scene.elapsedTime;
+    const topChance = Phaser.Math.Clamp(T.topChance + elapsed*T.difficultyScaleRate, 0.3, 0.85);
+    const bottomChance = Phaser.Math.Clamp(T.bottomChance + elapsed*T.difficultyScaleRate, 0.4, 0.95);
 
-    const topChance = 0.33;
-    const bottomChance = 0.33;
-    const holeChance = 0.34;
+    const hasTop = Math.random() < topChance;
+    const hasBottom = Math.random() < bottomChance;
+    let top = null, bottom = null;
+    const doubleBottom = !hasTop && hasBottom && (Math.random() < T.doubleObstacleChance);
 
-    let hasTop = Math.random() < topChance;
-    let hasBottom = Math.random() < bottomChance;
-
-    if (!hasTop && !hasBottom) {
-      if (Math.random() < 0.5) hasTop = true; else hasBottom = true;
-    }
-
-    let top = null;
-    let bottom = null;
-
+    // --- Top Vine ---
     if (hasTop) {
-      top = scene.obstacles.create(spawnX, topY, 'vine');
-      top.setOrigin(0.5,0);
-      top.setScale(0.35);
-      top.flipY = true;
-      top.body.setAllowGravity(false);
-      top.body.setImmovable(true);
-      top.setData('pairId', id);
-      top.setData('isTop', true);
-      scene.physics.add.collider(scene.wizard, top, (wiz, vine) => handleHit(scene, vine));
+        top = scene.obstacles.create(spawnX, 0, 'vine').setOrigin(0.5,1);
+        const scale = Phaser.Math.FloatBetween(0.08, 0.22) * (scene.scale.height / BASE_H);
+        top.setScale(scale);
+        top.flipY = true;
+        top.body.setAllowGravity(false);
+        top.body.setImmovable(true);
+        top.y = Phaser.Math.Between(Math.round(scene.scale.height*0.05), Math.round(scene.scale.height*0.4)); // random vertical
+        top.x += Phaser.Math.Between(-Math.round(W*0.05), Math.round(W*0.05));
+        top.setData('pairId', id);
+        top.setData('isTop', true);
+        scene.physics.add.collider(scene.wizard, top, (wiz, vine) => handleHit(scene, vine));
+
+        if (Math.random() < T.movingVineChance) {
+            const bob = Phaser.Math.Between(18, 38);
+            scene.tweens.add({ targets: top, y: bob, duration: Phaser.Math.Between(900, 1600), yoyo:true, repeat:-1, ease: 'Sine.easeInOut' });
+        }
     }
 
+    // --- Bottom Vine / Hole ---
     if (hasBottom) {
-      const bottomIsHole = Math.random() < holeChance;
-      if (bottomIsHole) {
-        bottom = scene.physics.add.sprite(spawnX, bottomY, 'hole');
-        bottom.setOrigin(0.5, 1);
-        bottom.setScale(0.5); 
-        bottom.body.setAllowGravity(false);
-        bottom.body.setImmovable(true);
-        bottom.setData('isHole', true);
-        bottom.setData('pairId', id);
-        bottom.setData('isTop', false);
-      } else {
-        bottom = scene.obstacles.create(spawnX, bottomY, 'vinetop');
-        bottom.setOrigin(0.5,1);
-        bottom.setScale(0.35); 
-        bottom.body.setAllowGravity(false);
-        bottom.body.setImmovable(true);
-        bottom.setData('pairId', id);
-        bottom.setData('isTop', false);
-        scene.physics.add.collider(scene.wizard, bottom, (wiz, vine) => handleHit(scene, vine));
-      }
+        const bottomIsHole = Math.random() < T.holeChance;
+        if (bottomIsHole) {
+            bottom = scene.physics.add.sprite(spawnX, scene.groundY, 'hole').setOrigin(0.5,1);
+            const holeScale = Phaser.Math.FloatBetween(0.4, 0.9) * (scene.scale.height / BASE_H);
+            bottom.setScale(holeScale);
+            bottom.body.setAllowGravity(false);
+            bottom.body.setImmovable(true);
+            bottom.setData('isHole', true);
+            bottom.setData('pairId', id);
+            bottom.setData('isTop', false);
+        } else {
+            const v = scene.obstacles.create(spawnX, scene.groundY, 'vinetop').setOrigin(0.5,1);
+            v.setScale(Phaser.Math.FloatBetween(0.10, 0.36) * (scene.scale.height / BASE_H));
+            v.body.setAllowGravity(false);
+            v.body.setImmovable(true);
+            v.y -= Phaser.Math.Between(Math.round(scene.wizard.displayHeight*0.22), Math.round(scene.wizard.displayHeight*0.5));
+            v.x += Phaser.Math.Between(-Math.round(W*0.05), Math.round(W*0.05)); // random horizontal
+            v.setData('pairId', id);
+            v.setData('isTop', false);
+            scene.physics.add.collider(scene.wizard, v, (wiz, vine) => handleHit(scene, vine));
+            bottom = v;
+
+            if (doubleBottom && Math.random() < 0.9) {
+                const v2 = scene.obstacles.create(spawnX + Math.round(scene.scale.width*0.12), scene.groundY, 'vinetop').setOrigin(0.5,1);
+                v2.setScale(Phaser.Math.FloatBetween(0.10, 0.30) * (scene.scale.height / BASE_H));
+                v2.body.setAllowGravity(false);
+                v2.body.setImmovable(true);
+                v2.y -= Phaser.Math.Between(Math.round(scene.wizard.displayHeight*0.18), Math.round(scene.wizard.displayHeight*0.45));
+                v2.x += Phaser.Math.Between(-Math.round(W*0.05), Math.round(W*0.05));
+                v2.setData('pairId', id);
+                v2.setData('isTop', false);
+                scene.physics.add.collider(scene.wizard, v2, (wiz, vine) => handleHit(scene, vine));
+                bottom = { sprite: v, extra: v2 };
+            }
+        }
     }
 
     scene.pairs[id] = {
-      top: top,
-      bottom: bottom,
-      isHole: !!(bottom && bottom.getData && bottom.getData('isHole')),
-      collided: false,
-      passed: false
+        top, bottom,
+        isHole: !!(bottom && bottom.getData && bottom.getData('isHole')),
+        collided: false,
+        passed: false
     };
 
-    if (top && top.body) top.body.setVelocityX(-scene.wizardSpeed);
-    if (bottom && bottom.body) bottom.body.setVelocityX(-scene.wizardSpeed);
-
-    sceneLog(scene, `spawnPair id=${id} hole=${!!(bottom && bottom.getData && bottom.getData('isHole'))}`);
-  }
-
-  // ---------------- Collisions & Effects ----------------
-  function handleHoleEnter(scene, pairId) {
-    const pair = scene.pairs[pairId];
-    if (!pair || pair.collided) return;
-    pair.collided = true;
-
-    scene.consecutiveAvoids = 0;
-    scene.infoTxt.setText('Dropped into hole — wizard slowed!');
-
-    if (!scene.slowing) {
-      scene.slowing = true;
-      scene.wizardSpeed = Math.max(scene.minWizardSpeed, scene.wizardSpeed - scene.slowAmount);
-      scene.cameras.main.shake(120, 0.005);
-      scene.wizard.setTint(0xff7744);
-
-      const dropDepth = 42;
-      scene.tweens.add({
-        targets: scene.wizard,
-        y: scene.wizard.y + dropDepth,
-        duration: 160,
-        ease: 'Power2',
-        onComplete: () => {
-          scene.time.delayedCall(260, () => {
-            scene.tweens.add({ targets: scene.wizard, y: scene.wizardDefaultY, duration: 220, ease: 'Power2' });
-          });
+    // Set initial velocity for obstacles (move left at witch speed)
+    const setVel = (obj) => { 
+        if (!obj) return; 
+        if (obj.body) obj.body.setVelocityX(-scene.wizardSpeed); 
+        else if (obj.sprite) { 
+            obj.sprite.body.setVelocityX(-scene.wizardSpeed); 
+            if (obj.extra) obj.extra.body.setVelocityX(-scene.wizardSpeed); 
         }
-      });
+    };
+    setVel(top); 
+    setVel(bottom);
+}
 
-      scene.time.delayedCall(scene.slowDuration + 300, () => {
-        scene.wizardSpeed = scene.baseWizardSpeed;
-        scene.wizard.clearTint();
-        scene.slowing = false;
-      });
-    }
-  }
 
+  // --- Hit / Obstacle Handling ---
   function handleHit(scene, obstacle) {
     const pid = obstacle.getData('pairId');
     if (pid == null) return;
@@ -248,16 +261,13 @@ window.onload = () => {
     if (!pair || pair.collided) return;
     pair.collided = true;
 
-    scene.consecutiveAvoids = 0;
-    scene.infoTxt.setText('Hit! Wizard slowed.');
-
+    scene.comboHits++;
+    scene.infoTxt.setText(`Obstacle hit! Combo: ${scene.comboHits}`);
     if (!scene.slowing) {
       scene.slowing = true;
       scene.wizardSpeed = Math.max(scene.minWizardSpeed, scene.wizardSpeed - scene.slowAmount);
       scene.cameras.main.shake(120, 0.005);
       scene.wizard.setTint(0xff7744);
-      scene.tweens.add({ targets: scene.wizard, y: scene.wizardDefaultY, duration: 200, ease: 'Power2' });
-
       scene.time.delayedCall(scene.slowDuration, () => {
         scene.wizardSpeed = scene.baseWizardSpeed;
         scene.wizard.clearTint();
@@ -266,175 +276,154 @@ window.onload = () => {
     }
   }
 
-  function startSlide(scene) {
-    scene.isSliding = true;
-    const bw = scene.wizard.displayWidth * 0.6;
-    const bh = scene.wizard.displayHeight * 0.4; // half-height
-    scene.wizard.body.setSize(bw, bh);
-    scene.wizard.body.setOffset((scene.wizard.displayWidth - bw) / 2, scene.wizard.displayHeight - bh);
-    scene.wizard.setScale(scene.wizard.scaleX, scene.wizard.scaleY * 0.5);
-    scene.time.delayedCall(scene.slideDuration, () => {
-      if (!scene.gameOverFlag) endSlide(scene);
-    });
-  }
+  function updateWorld(scene, delta) {
+    const dt = delta/1000;
+    scene.elapsedTime += dt;
 
-  function endSlide(scene) {
-    scene.isSliding = false;
-    const bw = scene.wizard.displayWidth * 0.6;
-    const bh = scene.wizard.displayHeight * 0.9;
-    scene.wizard.body.setSize(bw, bh);
-    scene.wizard.body.setOffset((scene.wizard.displayWidth - bw) / 2, scene.wizard.displayHeight - bh);
-    scene.wizard.setScale(scene.wizard.scaleX, scene.wizard.scaleY * (120 / scene.wizard.displayHeight));
-  }
+    // constant ghost speed
+    const ghostLeadMin = Math.round(scene.scale.height * 0.18);
+    const ghostLeadMax = Math.round(scene.scale.height * 0.28);
+
+    // if witch missed obstacles, ghost lead shrinks
+    const gapReduction = scene.misses ? scene.misses * 20 : 0; 
+    const targetGhostWorldX = scene.wizardWorldX + ghostLeadMax - gapReduction;
+
+    // move ghost toward target
+    if (scene.ghostWorldX < targetGhostWorldX) {
+        scene.ghostWorldX += 200 * dt; // uniform ghost speed
+    } else {
+        scene.ghostWorldX = targetGhostWorldX;
+    }
+
+    // move witch forward
+    scene.wizardWorldX += scene.wizardSpeed * dt;
+
+    // screen positions
+    scene.ghost.x = Phaser.Math.Clamp(scene.wizardScreenX + (scene.ghostWorldX - scene.wizardWorldX),
+        scene.wizardScreenX + ghostLeadMin, scene.scale.width - Math.round(scene.scale.width*0.12));
+
+    // move obstacles left
+    for (const id in scene.pairs) {
+        const pair = scene.pairs[id];
+        const setVel = (obj) => { 
+            if (!obj) return; 
+            if (obj.body) obj.body.setVelocityX(-scene.wizardSpeed); 
+            else if (obj.sprite) { 
+                obj.sprite.body.setVelocityX(-scene.wizardSpeed); 
+                if (obj.extra) obj.extra.body.setVelocityX(-scene.wizardSpeed); 
+            }
+        };
+        setVel(pair.top); setVel(pair.bottom);
+    }
+}
+
+function handleMiss(scene) {
+    scene.misses = (scene.misses || 0) + 1;
+    scene.infoTxt.setText(`Missed obstacle! Total misses: ${scene.misses}`);
+
+    // shrink ghost lead gradually
+    if (scene.misses >= 3) {
+        doGameOver(scene, 'The witch caught the ghost after too many misses!');
+    }
+}
+
+
 
   function checkPairs(scene) {
-    for (const id in scene.pairs) {
-      const pair = scene.pairs[id];
-      if (!pair) continue;
-      if (!pair.passed) {
-        const topRight = pair.top ? (pair.top.x + pair.top.displayWidth / 2) : -9999;
-        const bottomRight = pair.bottom ? (pair.bottom.x + pair.bottom.displayWidth / 2) : -9999;
-        const topPassed = pair.top ? (topRight < scene.wizard.x) : true;
-        const bottomPassed = pair.bottom ? (bottomRight < scene.wizard.x) : true;
+  for (const id in scene.pairs) {
+    const pair = scene.pairs[id];
+    if (!pair) continue;
 
-        if (topPassed && bottomPassed) {
-          pair.passed = true;
-          if (!pair.collided) {
-            scene.consecutiveAvoids++;
-            if (scene.consecutiveAvoids >= 3) {
-              doGameOver(scene, 'Wizard avoided two pairs — he caught the ghost!');
-              return;
-            }
-          } else {
-            scene.consecutiveAvoids = 0;
-          }
-        }
+    if (!pair.passed) {
+      const topRight = pair.top ? (pair.top.x + (pair.top.displayWidth/2)) : -9999;
+      let bottomRight = -9999;
+      if (pair.bottom) {
+        if (pair.bottom.sprite) bottomRight = pair.bottom.extra ? (pair.bottom.extra.x + pair.bottom.extra.displayWidth/2) : (pair.bottom.sprite.x + pair.bottom.sprite.displayWidth/2);
+        else bottomRight = (pair.bottom.x + (pair.bottom.displayWidth/2));
       }
+      const topPassed = pair.top ? (topRight < scene.wizard.x) : true;
+      const bottomPassed = pair.bottom ? (bottomRight < scene.wizard.x) : true;
 
-      const topGone = !pair.top || (pair.top.x < -220);
-      const bottomGone = !pair.bottom || (pair.bottom.x < -220);
-      if (topGone && bottomGone) {
-        if (pair.top) pair.top.destroy();
-        if (pair.bottom) pair.bottom.destroy();
-        delete scene.pairs[id];
+      if (topPassed && bottomPassed) {
+      pair.passed = true;
+      if (!pair.collided) {
+          scene.comboHits++;
+      } else {
+          scene.comboHits = 0; // reset combo if missed
+          handleMiss(scene);  // <-- increment miss counter
       }
     }
-  }
 
-  function updateWorld(scene, delta) {
-    const dt = delta / 1000;
-    scene.wizardWorldX += scene.wizardSpeed * dt;
-    scene.ghostWorldX += scene.ghostSpeed * dt;
-
-    const gap = scene.ghostWorldX - scene.wizardWorldX;
-    const ghostScreenX = scene.wizardScreenX + gap;
-    scene.ghost.x = Phaser.Math.Clamp(ghostScreenX, scene.wizardScreenX + 40, scene.game.config.width - 80);
-
-    for (const id in scene.pairs) {
-      const pair = scene.pairs[id];
-      if (pair.top && pair.top.body) pair.top.body.setVelocityX(-scene.wizardSpeed);
-      if (pair.bottom && pair.bottom.body) pair.bottom.body.setVelocityX(-scene.wizardSpeed);
     }
 
-    const dist = Math.max(0, Math.round(scene.ghostWorldX - scene.wizardWorldX));
-    scene.distanceTxt.setText(`Distance (ghost ahead): ${dist} px\nWizard speed: ${Math.round(scene.wizardSpeed)} px/s`);
+    const offscreenLeft = -Math.round(scene.scale.width * 0.5);
+    const topGone = !pair.top || (pair.top.x < offscreenLeft);
+    const bottomGone = !pair.bottom || ((pair.bottom.sprite ? pair.bottom.sprite.x : pair.bottom.x) < offscreenLeft);
+    if (topGone && bottomGone) {
+      if (pair.top && pair.top.destroy) pair.top.destroy();
+      if (pair.bottom) {
+        if (pair.bottom.sprite) { pair.bottom.sprite.destroy(); if (pair.bottom.extra) pair.bottom.extra.destroy(); }
+        else if (pair.bottom.destroy) pair.bottom.destroy();
+      }
+      delete scene.pairs[id];
+    }
   }
+}
+
 
   function doGameOver(scene, reason) {
     if (scene.gameOverFlag) return;
     scene.gameOverFlag = true;
     scene.infoTxt.setText(`GAME OVER: ${reason}\nClick/tap to restart`);
     scene.cameras.main.flash(300,255,0,0);
-    stopSpawning(scene);
-
     for (const id in scene.pairs) {
       const pair = scene.pairs[id];
-      if (pair.top && pair.top.body) pair.top.body.setVelocityX(0);
-      if (pair.bottom && pair.bottom.body) pair.bottom.body.setVelocityX(0);
+      const freeze = (o) => { if (!o) return; if (o.body) o.body.setVelocityX(0); else if (o.sprite) { o.sprite.body.setVelocityX(0); if (o.extra) o.extra.setVelocityX(0); }};
+      freeze(pair.top); freeze(pair.bottom);
     }
-
     if (scene.wizard && scene.wizard.body) scene.wizard.body.enable = false;
   }
 
-  function restartGame(scene) {
-    window.location.reload();
-  }
+  function restartGame(scene) { window.location.reload(); }
 
-  // ---------------- Phaser scene ----------------
   const config = {
     type: Phaser.AUTO,
-    width: W,
-    height: H,
+    width: BASE_W,
+    height: BASE_H,
     parent: 'game-container',
-    backgroundColor: '#101018',
-    physics: {
-      default: 'arcade',
-      arcade: { gravity: { y: 1200 }, debug: false }
-    },
+    backgroundColor: '#0f1020',
+    physics: { default: 'arcade', arcade: { gravity: { y: 1200 }, debug: false } },
     scene: {
-      preload: function() {
-        initGameParams(this);
-        preloadAssets(this);
-      },
+      preload: function() { initGameParams(this); preloadAssets(this); },
       create: function() {
         const scene = this;
-
+        initGameParams(scene);
         generatePlaceholderTextures(scene);
-        createBackground(scene, W, H);
-        const ground = createGround(scene, W, H);
-
-        createWizard(scene); // 👈 now big and visible
+        createBackground(scene);
+        createGround(scene);
+        createWizard(scene);
         createGhost(scene);
         createObstaclesGroup(scene);
-
-        scene.physics.add.collider(scene.wizard, ground);
-
-        setupInput(scene);
-        createUI(scene);
-
-        startSpawning(scene);
-
-        scene.input.on('pointerdown', () => {
-          if (scene.gameOverFlag) restartGame(scene);
-        });
+        scene.physics.add.collider(scene.wizard, scene.physics.world.staticBodies);
+        setupInput(scene); createUI(scene);
+        scheduleNextSpawn(scene);
+        scene.input.on('pointerdown', () => { if (scene.gameOverFlag) restartGame(scene); });
       },
       update: function(time, delta) {
         const scene = this;
         if (scene.gameOverFlag) return;
 
-        const justUp = Phaser.Input.Keyboard.JustDown(scene.cursors.up1) ||
-                       Phaser.Input.Keyboard.JustDown(scene.cursors.up2) ||
-                       Phaser.Input.Keyboard.JustDown(scene.cursors.space);
-        if (justUp && scene.wizard.body.blocked.down) {
-          scene.wizard.setVelocityY(scene.jumpVelocity);
-          if (scene.isSliding) endSlide(scene);
-        }
+        const justUp = Phaser.Input.Keyboard.JustDown(scene.cursors.up1) || Phaser.Input.Keyboard.JustDown(scene.cursors.up2) || Phaser.Input.Keyboard.JustDown(scene.cursors.space);
+        if (justUp && scene.wizard.body.blocked.down) { scene.wizard.setVelocityY(scene.jumpVelocity); if (scene.isSliding) endSlide(scene); }
 
-        const justDown = Phaser.Input.Keyboard.JustDown(scene.cursors.down1) ||
-                         Phaser.Input.Keyboard.JustDown(scene.cursors.down2);
-        if (justDown && scene.wizard.body.blocked.down) {
-          let holeTriggered = false;
-          for (const id in scene.pairs) {
-            const pair = scene.pairs[id];
-            if (pair.isHole && !pair.collided && pair.bottom) {
-              const wizBounds = scene.wizard.getBounds();
-              const holeBounds = pair.bottom.getBounds();
-              if (Phaser.Geom.Intersects.RectangleToRectangle(wizBounds, holeBounds)) {
-                handleHoleEnter(scene, parseInt(id,10));
-                holeTriggered = true;
-                break;
-              }
-            }
-          }
-          if (!holeTriggered && !scene.isSliding) startSlide(scene);
-        }
+        const justDown = Phaser.Input.Keyboard.JustDown(scene.cursors.down1) || Phaser.Input.Keyboard.JustDown(scene.cursors.down2);
+        if (justDown && scene.wizard.body.blocked.down) startSlide(scene);
+        if ((scene.cursors.down1.isUp && scene.cursors.down2.isUp) && scene.isSliding) endSlide(scene);
 
-        updateWorld(scene, delta);
         checkPairs(scene);
+        updateWorld(scene, delta);
 
-        if (scene.wizardWorldX >= scene.ghostWorldX) {
-          doGameOver(scene, 'Wizard caught the ghost!');
-        }
+        if (scene.ghost.x <= scene.wizardScreenX + Math.round(scene.scale.height * 0.05)) doGameOver(scene, 'The ghost caught the wizard!');
       }
     }
   };

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Witch vs Ghost — Phaser</title>
+  <style>
+    body {
+      margin: 0;
+      background: #111;
+      overflow: hidden;
+    }
+    #game-container {
+      width: 100%;
+      height: 100vh;
+    }
+  </style>
+</head>
+<body>
+  <div id="game-container"></div>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.min.js"></script>
+  <script>
+    const config = {
+      type: Phaser.AUTO,
+      width: 800,
+      height: 400,
+      parent: 'game-container',
+      physics: {
+        default: 'arcade',
+        arcade: { gravity: { y: 900 }, debug: false }
+      },
+      scene: { preload, create, update }
+    };
+
+    let witch, ghost, obstacles, cursors, scoreText, infoText;
+    let score = 0, missed = 0, gameOver = false, obstacleSpeed = 200;
+    let ghostWorldX = 300, witchWorldX = 0;
+
+    const MAX_MISSES = 3;
+
+    const game = new Phaser.Game(config);
+
+    function preload() {
+      // Load your sprite images here
+      this.load.image('witch', 'kathnarpic.png');
+      this.load.image('ghost', 'neeli.png');
+      this.load.image('floor', 'floorpic.png');
+      this.load.image('vine', 'vinetop-pic.png');
+      this.load.image('hole', 'holepic.png');
+    }
+
+    function create() {
+      const scene = this;
+      // Background floor
+      scene.add.tileSprite(400, 400, 800, 80, 'floor').setOrigin(0.5, 1);
+
+      // Witch (player-controlled)
+      witch = scene.physics.add.sprite(100, 300, 'witch').setOrigin(0.5, 1).setScale(0.6);
+      witch.setCollideWorldBounds(true);
+
+      // Ghost (always ahead)
+      ghost = scene.add.sprite(650, 300, 'ghost').setOrigin(0.5, 1).setScale(0.8);
+
+      // Obstacles group
+      obstacles = scene.physics.add.group({ allowGravity: false, immovable: true });
+
+      // Input
+      cursors = scene.input.keyboard.createCursorKeys();
+      scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+
+      // UI
+      scoreText = scene.add.text(16, 16, 'Score: 0', { font: '18px Arial', fill: '#fff' });
+      infoText = scene.add.text(16, 40, 'Missed: 0/' + MAX_MISSES, { font: '18px Arial', fill: '#fff' });
+
+      // Collisions
+      scene.physics.add.overlap(witch, obstacles, handleHit, null, scene);
+
+      // Spawn obstacles
+      scene.time.addEvent({
+        delay: 1500,
+        loop: true,
+        callback: () => spawnObstacle(scene)
+      });
+    }
+
+    function update(time, delta) {
+      if (gameOver) return;
+
+      // Ghost stays ahead of witch, but closes after misses
+      ghost.x = witch.x + (ghostWorldX - witchWorldX);
+
+      // Controls: Jump and Slide
+      if (Phaser.Input.Keyboard.JustDown(cursors.space)) {
+        if (witch.body.blocked.down) witch.setVelocityY(-400);
+      }
+      if (Phaser.Input.Keyboard.JustDown(cursors.down)) {
+        if (witch.body.blocked.down) {
+          witch.setScale(0.6, 0.35);
+          this.time.delayedCall(150, () => witch.setScale(0.6, 0.6));
+        }
+      }
+
+      // Increase speed gradually
+      obstacleSpeed += 0.02;
+
+      // Move obstacles
+      obstacles.children.iterate(o => {
+        if (o) o.x -= obstacleSpeed * delta / 1000;
+        if (o && o.x < -50) {
+          if (!o.getData('hit')) {
+            missed++;
+            catchUp();
+            infoText.setText('Missed: ' + missed + '/' + MAX_MISSES);
+          }
+          o.destroy();
+        }
+      });
+
+      // Check Game Over
+      if (missed >= MAX_MISSES || witch.x + witch.width >= ghost.x - 10) {
+        endGame(this, 'Witch caught the Ghost!');
+      }
+    }
+
+    function spawnObstacle(scene) {
+      if (gameOver) return;
+      const type = Math.random() > 0.5 ? 'sky' : 'pothole';
+      let obstacle;
+      if (type === 'sky') {
+        obstacle = obstacles.create(800, 150, 'vine').setOrigin(0.5, 0).setScale(0.8);
+      } else {
+        obstacle = obstacles.create(800, 400, 'hole').setOrigin(0.5, 1).setScale(0.8);
+      }
+      obstacle.setData('type', type);
+      obstacle.setData('hit', false);
+    }
+
+    function handleHit(witch, obstacle) {
+      const type = obstacle.getData('type');
+      if (type === 'sky' && witch.body.velocity.y < 0) {
+        score++;
+        obstacle.setData('hit', true);
+        obstacle.destroy();
+      } else if (type === 'pothole' && witch.scaleY < 0.5) {
+        score++;
+        obstacle.setData('hit', true);
+        obstacle.destroy();
+      }
+      scoreText.setText('Score: ' + score);
+    }
+
+    function catchUp() {
+      const distance = ghost.x - witch.x - witch.width;
+      const remaining = MAX_MISSES - missed + 1;
+      const catchUp = distance / remaining;
+      witch.x += catchUp;
+      witchWorldX += catchUp;
+    }
+
+    function endGame(scene, msg) {
+      gameOver = true;
+      scene.add.text(100, 200, 'GAME OVER: ' + msg, { font: '24px Arial', fill: '#ff0' });
+    }
+  </script>
+</body>
+</html>
